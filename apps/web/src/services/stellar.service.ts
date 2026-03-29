@@ -12,6 +12,8 @@
  */
 
 import {
+  Transaction,
+  FeeBumpTransaction,
   Keypair,
   TransactionBuilder,
   Operation,
@@ -485,7 +487,7 @@ export class StellarService {
    */
   async getDistributionHistory(startId: bigint, limit: bigint): Promise<(DistributionHistory & { id: string })[]> {
     try {
-      const result = await this.invokeContractReadOnly<any[]>(
+      const result = await this.invokeContractReadOnly<Record<string, unknown>[]>(
         this.distributorContractId,
         'get_distribution_history',
         [
@@ -494,13 +496,13 @@ export class StellarService {
         ]
       );
 
-      return (result || []).map((r: any, index: number) => ({
+      return (result || []).map((r: Record<string, unknown>, index: number) => ({
         id: (startId + BigInt(index)).toString(),
-        sender: r.sender,
-        token: r.token,
-        amount: BigInt(r.amount),
-        recipients_count: Number(r.recipients_count),
-        timestamp: BigInt(r.timestamp),
+        sender: String(r.sender),
+        token: String(r.token),
+        amount: BigInt(r.amount as string | number | bigint | boolean),
+        recipients_count: Number(r.recipients_count as string | number),
+        timestamp: BigInt(r.timestamp as string | number | bigint | boolean),
       }));
     } catch (error) {
       throw parseError(error);
@@ -587,8 +589,16 @@ export class StellarService {
   ): Promise<T | null> {
     try {
       // Create a simulation request
-      const accountResponse = await this.rpcServer.getAccount(contractId) as any;
-      const sourceAccount = new Account(accountResponse.id || accountResponse.accountId, accountResponse.sequence);
+      let sourceAddress: string;
+      try {
+        const accountResponse = await this.rpcServer.getAccount(contractId);
+        sourceAddress = accountResponse.accountId();
+      } catch {
+        // Fallback for contract IDs or if getAccount fails
+        sourceAddress = contractId;
+      }
+      
+      const sourceAccount = new Account(sourceAddress, "0"); // Sequence 0 for simulation
 
       const tx = new TransactionBuilder(sourceAccount, {
         fee: DEFAULT_BASE_FEE,
@@ -707,7 +717,7 @@ export class StellarService {
   /**
    * Submit transaction and wait for confirmation
    */
-  private async submitAndWait(tx: any): Promise<TransactionResult<unknown>> {
+  private async submitAndWait(tx: Transaction | FeeBumpTransaction): Promise<TransactionResult<unknown>> {
     const sendResponse = await withRetry(() => this.rpcServer.sendTransaction(tx), { maxRetries: this.maxRetries }) as Awaited<ReturnType<typeof this.rpcServer.sendTransaction>>;
     const hash = sendResponse.hash;
 

@@ -1,9 +1,13 @@
 "use client";
 
-import { useCallback, useState, useRef, useEffect } from "react";
+import { useCallback, useState, useRef, useEffect, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useWallet } from "@/providers/StellarWalletProvider";
+import { fetchAccountInfo } from "@/lib/api";
+import { type AccountBalance } from "@/services";
 import { allbridgeService, type BridgeQuote } from "@/services/allbridge.service";
 import { offrampService } from "@/services/offramp.service";
+import { useTokenBalance } from "./useTokenBalance";
 import {
     createMockTxHash,
     getMockBridgeQuote,
@@ -31,7 +35,9 @@ interface UseOfframpBridgeReturn {
     // Form State
     formState: OfframpFormState;
     handleFormChange: (field: keyof OfframpFormState, value: string) => void;
-    handleMaxClick: (balance: string) => void;
+    handleMaxClick: () => void;
+    currentTokenBalance: string;
+    isLoadingBalance: boolean;
 
     // Bank operations
     banks: Bank[];
@@ -64,7 +70,7 @@ interface UseOfframpBridgeReturn {
 }
 
 export function useOfframpBridge(): UseOfframpBridgeReturn {
-    const { address, isConnected, signTransaction } = useWallet();
+    const { address, isConnected, signTransaction, network } = useWallet();
 
     // Core state
     const [step, setStep] = useState<OfframpStep>("form");
@@ -100,6 +106,21 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
     const bridgePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
     const payoutPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+    // ---------- Balance Fetching ----------
+    // Use the dedicated useTokenBalance hook for better separation of concerns
+    const { balance: currentTokenBalance, isLoading: isLoadingBalance, error: balanceError } = useTokenBalance({
+        token: formState.token,
+        enabled: isConnected,
+    });
+
+    // Fallback to the original implementation for backward compatibility
+    const { data: accountInfo } = useQuery({
+        queryKey: ["token-balances", address, network],
+        queryFn: async ({ signal }: { signal: AbortSignal }) => address ? fetchAccountInfo(address, signal) : null,
+        enabled: false, // Disabled since we're using useTokenBalance hook
+        staleTime: 30000,
+    });
+
     // Cleanup polling on unmount
     useEffect(() => {
         return () => {
@@ -115,7 +136,7 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
     }, []);
 
     const handleFormChange = useCallback((field: keyof OfframpFormState, value: string) => {
-        setFormState((prev) => ({
+        setFormState((prev: OfframpFormState) => ({
             ...prev,
             [field]: value,
             ...(field === "bankCode" || field === "accountNumber"
@@ -128,9 +149,13 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
         }
     }, []);
 
-    const handleMaxClick = useCallback((balance: string) => {
-        setFormState(prev => ({ ...prev, amount: balance }));
-    }, []);
+    const handleMaxClick = useCallback(() => {
+        // Ensure we have a valid balance and it's not "0"
+        if (!currentTokenBalance || currentTokenBalance === "0" || isLoadingBalance) {
+            return;
+        }
+        setFormState((prev: OfframpFormState) => ({ ...prev, amount: currentTokenBalance }));
+    }, [currentTokenBalance, isLoadingBalance]);
 
     // ---------- Effects: Bank Loading ----------
 
@@ -140,7 +165,7 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
         const fetchBanks = async () => {
             setIsLoadingBanks(true);
             setBanks([]);
-            setFormState(prev => ({ ...prev, bankCode: "", accountNumber: "", accountName: "" }));
+            setFormState((prev: OfframpFormState) => ({ ...prev, bankCode: "", accountNumber: "", accountName: "" }));
 
             try {
                 const result = await offrampService.getBankList(
@@ -163,7 +188,6 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
                 if (isAbortError(error)) {
                     return;
                 }
-                console.error("Failed to load banks:", error);
             } finally {
                 if (!controller.signal.aborted) {
                     setIsLoadingBanks(false);
@@ -199,9 +223,9 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
                 }
 
                 if (result.success && result.data) {
-                    setFormState(prev => ({ ...prev, accountName: result.data!.accountName }));
+                    setFormState((prev: OfframpFormState) => ({ ...prev, accountName: result.data!.accountName }));
                 } else {
-                    setFormState(prev => ({ ...prev, accountName: "" }));
+                    setFormState((prev: OfframpFormState) => ({ ...prev, accountName: "" }));
                 }
             } catch (error) {
                 if (isAbortError(error)) {
@@ -315,7 +339,6 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
                 setOfframpData(offrampRes.data);
 
                 // Step 2: Calculate bridge fees using Allbridge SDK
-                console.log("offrampRes.data", offrampRes.data.depositAmount);
                 const depositAmount = offrampRes.data.depositAmount.toString();
                 const quoteResult = isOfframpMockEnabled
                     ? getMockBridgeQuote(depositAmount)
@@ -354,7 +377,6 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
     const startPayoutPolling = useCallback(() => {
         if (!offrampData?.reference) return;
         if (payoutPollRef.current) clearInterval(payoutPollRef.current);
-        console.log("polling reference:", offrampData.reference)
         const intervalMs = isOfframpMockEnabled ? getMockDelay("status") : 10000;
         payoutPollRef.current = setInterval(async () => {
             try {
@@ -462,22 +484,20 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
         if (payoutPollRef.current) clearInterval(payoutPollRef.current);
         setStep("form");
         setError(null);
-        setIsLoading(false);
-        setFormState({
-            token: "USDC",
+        setFormState((prev: OfframpFormState) => ({
+            ...prev,
             amount: "",
-            country: "NG",
             bankCode: "",
             accountNumber: "",
             accountName: "",
-        });
-        setBridgeQuote(null);
-        setFeeBreakdown(null);
-        setOfframpData(null);
-        setBridgeTxHash(null);
-        setPayoutStatus(null);
+        }));
         setQuote(null);
         setQuoteError(null);
+        setBridgeQuote(null);
+        setFeeBreakdown(null);
+        setPayoutStatus(null);
+        setOfframpData(null);
+        setIsLoading(false);
         setIsLoadingQuote(false);
         setIsVerifyingAccount(false);
         setIsLoadingBanks(false);
@@ -512,6 +532,8 @@ export function useOfframpBridge(): UseOfframpBridgeReturn {
         formState,
         handleFormChange,
         handleMaxClick,
+        currentTokenBalance,
+        isLoadingBalance,
         isLoadingQuote,
         quote,
         quoteError,

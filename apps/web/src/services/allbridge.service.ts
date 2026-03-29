@@ -197,7 +197,7 @@ export const allbridgeService = {
                 gasFeeStablecoin = gasFees.stablecoin;
             }
         } catch (e) {
-            console.warn("Failed to get gas fee options:", e);
+            // Silently fail gas fee options - will fallback to defaults
         }
 
         // Get estimated time
@@ -276,7 +276,7 @@ export const allbridgeService = {
         try {
             const bumpXdr =
                 await sdk.utils.srb.simulateAndCheckRestoreTxRequiredSoroban(
-                    rawTx as any,
+                    rawTx,
                     account
                 );
 
@@ -301,7 +301,6 @@ export const allbridgeService = {
             if (msg.includes("Bump transaction failed")) {
                 throw e;
             }
-            console.warn("Bump check failed (may not be needed):", e);
         }
 
         return false;
